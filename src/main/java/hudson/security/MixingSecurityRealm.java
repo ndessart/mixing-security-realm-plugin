@@ -336,15 +336,21 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
     private Details selfAuthenticate(String username, String password) {
         Details u = super.loadUserByUsername(username);
         if (!u.isPasswordCorrect(password)) {
-            String message;
-            try {
-                message = ResourceBundle.getBundle("org.acegisecurity.messages").getString("AbstractUserDetailsAuthenticationProvider.badCredentials");
-            } catch (MissingResourceException x) {
-                message = "Bad credentials";
-            }
+            String message = this.getLocalizedBadCredentialsMessage();
             throw new BadCredentialsException(message);
         }
+        
         return u;
+    }
+
+    private String getLocalizedBadCredentialsMessage() {
+        try {
+            return ResourceBundle.getBundle("org.acegisecurity.messages").getString("AbstractUserDetailsAuthenticationProvider.badCredentials");
+        } catch (MissingResourceException x) {
+            /* Expected if localisation string not present */
+        }
+
+        return "Bad credentials";
     }
 
     @Override
