@@ -7,6 +7,7 @@ import hudson.model.Descriptor;
 import hudson.model.User;
 import hudson.model.UserProperty;
 import hudson.model.UserPropertyDescriptor;
+import hudson.security.SecurityRealm.SecurityComponents;
 import hudson.security.captcha.CaptchaSupport;
 import hudson.util.spring.BeanBuilder;
 import jenkins.model.Jenkins;
@@ -27,6 +28,7 @@ import org.jenkinsci.Symbol;
 import org.kohsuke.args4j.Option;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.StaplerRequest;
+import org.springframework.dao.DataAccessException;
 import org.springframework.web.context.WebApplicationContext;
 
 import javax.annotation.Nonnull;
@@ -91,64 +93,116 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
         for (SecurityRealm securityRealm : optionals) {
             securityComponentsMap.put(securityRealm, securityRealm.createSecurityComponents());
         }
-        return new SecurityComponents(authentication -> {
+
+        return new SecurityComponents(
+            new MixinAuthenticationManager(securityComponents, securityComponentsMap),
+            new MixinUserDetailsService(securityComponents, securityComponentsMap)
+        );
+    }
+
+    private class MixinAuthenticationManager implements AuthenticationManager {
+        private SecurityComponents securityComponents;
+        Map<SecurityRealm, SecurityComponents> securityComponentsMap;
+
+        MixinAuthenticationManager(SecurityComponents securityComponents,
+                Map<SecurityRealm, SecurityComponents> securityComponentsMap) {
+            this.securityComponents = securityComponents;
+            this.securityComponentsMap = securityComponentsMap;
+        }
+
+        @Override
+        public Authentication authenticate(Authentication authentication) throws AuthenticationException {
             String name = authentication.getName();
-            if (priority) {
-                if (isPrivateUser(name)) {
-                    logger.fine("SecurityComponents.authentication.isPrivateUser => " + name);
-                    return securityComponents.manager.authenticate(authentication);
-                } else {
-                    for (SecurityRealm securityRealm : optionals) {
-                        SecurityComponents components = securityComponentsMap.get(securityRealm);
-                        if (isOwnedBy(name, components.userDetails)) {
-                            logger.fine("SecurityComponents.authentication.isOwnedBy => " + name + " -> " + securityRealm);
-                            return components.manager.authenticate(authentication);
-                        }
-                    }
-                }
-            } else {
-                for (SecurityRealm securityRealm : optionals) {
-                    SecurityComponents components = securityComponentsMap.get(securityRealm);
-                    if (isOwnedBy(name, components.userDetails)) {
-                        logger.fine("SecurityComponents.authentication.isOwnedBy => " + name + " -> " + securityRealm);
-                        return components.manager.authenticate(authentication);
-                    }
-                }
-                if (isPrivateUser(name)) {
-                    logger.fine("SecurityComponents.authentication.isPrivateUser => " + name);
-                    return securityComponents.manager.authenticate(authentication);
+            Authentication authentication2 = null;
+            if (priority && authentication2 == null) {
+                authentication2 = authenticateLocal(name, authentication);
+            }
+            if (authentication2 == null) {
+                authentication2 = authenticateOptionals(name, authentication);
+                ;
+            }
+            if (!priority && authentication2 == null) {
+                authentication2 = authenticateLocal(name, authentication);
+            }
+
+            if (authentication2 == null) {
+                throw new UsernameNotFoundException("Not found in any realm: " + name);
+            }
+            return authentication2;
+        }
+
+        private Authentication authenticateLocal(String name, Authentication authentication) {
+            if (isPrivateUser(name)) {
+                logger.fine("SecurityComponents.authentication.isPrivateUser => " + name);
+                return securityComponents.manager.authenticate(authentication);
+            }
+            return null;
+        }
+
+        private Authentication authenticateOptionals(String name, Authentication authentication) {
+            for (SecurityRealm securityRealm : optionals) {
+                SecurityComponents components = securityComponentsMap.get(securityRealm);
+                if (isOwnedBy(name, components.userDetails)) {
+                    logger.fine("SecurityComponents.authentication.isOwnedBy => " + name + " -> " + securityRealm);
+                    return components.manager.authenticate(authentication);
                 }
             }
-            throw new UsernameNotFoundException("Not found in any realm: " + name);
-        }, username -> {
-            if (priority) {
-                try {
-                    logger.fine("SecurityComponents.loadUserByUsername.isPrivateUser => " + username);
-                    return securityComponents.userDetails.loadUserByUsername(username);
-                } catch (UsernameNotFoundException e) {
-                    for (SecurityRealm securityRealm : optionals) {
-                        SecurityComponents components = securityComponentsMap.get(securityRealm);
-                        try {
-                            logger.fine("SecurityComponents.loadUserByUsername.isOwnedBy => " + username + " -> " + securityRealm);
-                            return components.userDetails.loadUserByUsername(username);
-                        } catch (UsernameNotFoundException ignore) {
-                        }
-                    }
-                    throw e;
-                }
-            } else {
-                for (SecurityRealm securityRealm : optionals) {
-                    SecurityComponents components = securityComponentsMap.get(securityRealm);
+            return null;
+        }
+    }
+
+    private class MixinUserDetailsService implements UserDetailsService {
+        private SecurityComponents securityComponents;
+        Map<SecurityRealm, SecurityComponents> securityComponentsMap;
+
+        MixinUserDetailsService(SecurityComponents securityComponents,
+        Map<SecurityRealm, SecurityComponents> securityComponentsMap){
+            this.securityComponents = securityComponents;
+            this.securityComponentsMap = securityComponentsMap;
+        }
+
+        @Override
+        public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException, DataAccessException {
+            {
+                if (priority) {
                     try {
-                        logger.fine("SecurityComponents.loadUserByUsername.isOwnedBy => " + username + " -> " + securityRealm);
-                        return components.userDetails.loadUserByUsername(username);
-                    } catch (UsernameNotFoundException ignore) {
+                        return loadUserByUsernameLocal(username);
+                    } catch (UsernameNotFoundException e) {
+                        UserDetails ud = loadUserByUsernameOptionals(username);
+                        if (ud == null) {
+                            throw e;
+                        }
+                        
+                        return ud;
                     }
+                } else {
+                    UserDetails ud = loadUserByUsernameOptionals(username);
+
+                    if(ud == null) {
+                        ud = loadUserByUsernameLocal(username);
+                    }
+                    return ud;
                 }
-                logger.fine("SecurityComponents.loadUserByUsername.isPrivateUser => " + username);
-                return securityComponents.userDetails.loadUserByUsername(username);
             }
-        });
+        }
+
+        private UserDetails loadUserByUsernameLocal(String username) {
+            logger.fine("SecurityComponents.loadUserByUsername.isPrivateUser => " + username);
+            return securityComponents.userDetails.loadUserByUsername(username);
+        }
+
+        private UserDetails loadUserByUsernameOptionals(String username) {
+            for (SecurityRealm securityRealm : optionals) {
+                SecurityComponents components = securityComponentsMap.get(securityRealm);
+                try {
+                    logger.fine("SecurityComponents.loadUserByUsername.isOwnedBy => " + username + " -> "
+                            + securityRealm);
+                    return components.userDetails.loadUserByUsername(username);
+                } catch (UsernameNotFoundException ignore) {
+                }
+            }
+            return null;
+        }
     }
 
     public static Details fromUserDetail(UserDetails userDetails) {
@@ -282,15 +336,21 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
     private Details selfAuthenticate(String username, String password) {
         Details u = super.loadUserByUsername(username);
         if (!u.isPasswordCorrect(password)) {
-            String message;
-            try {
-                message = ResourceBundle.getBundle("org.acegisecurity.messages").getString("AbstractUserDetailsAuthenticationProvider.badCredentials");
-            } catch (MissingResourceException x) {
-                message = "Bad credentials";
-            }
+            String message = this.getLocalizedBadCredentialsMessage();
             throw new BadCredentialsException(message);
         }
+        
         return u;
+    }
+
+    private String getLocalizedBadCredentialsMessage() {
+        try {
+            return ResourceBundle.getBundle("org.acegisecurity.messages").getString("AbstractUserDetailsAuthenticationProvider.badCredentials");
+        } catch (MissingResourceException x) {
+            /* Expected if localisation string not present */
+        }
+
+        return "Bad credentials";
     }
 
     @Override
