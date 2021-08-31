@@ -1,40 +1,36 @@
 package hudson.security;
 
-import groovy.lang.Binding;
 import hudson.*;
-import hudson.cli.CLICommand;
 import hudson.model.Descriptor;
 import hudson.model.User;
 import hudson.model.UserProperty;
 import hudson.model.UserPropertyDescriptor;
 import hudson.security.SecurityRealm.SecurityComponents;
 import hudson.security.captcha.CaptchaSupport;
-import hudson.util.spring.BeanBuilder;
+import hudson.security.HudsonPrivateSecurityRealm.Details;
 import jenkins.model.Jenkins;
-import jenkins.security.ImpersonatingUserDetailsService;
+import jenkins.security.ImpersonatingUserDetailsService2;
 import jenkins.security.SecurityListener;
 import net.sf.json.JSONArray;
 import net.sf.json.JSONObject;
-import org.acegisecurity.Authentication;
-import org.acegisecurity.AuthenticationException;
-import org.acegisecurity.AuthenticationManager;
-import org.acegisecurity.BadCredentialsException;
-import org.acegisecurity.providers.UsernamePasswordAuthenticationToken;
-import org.acegisecurity.providers.dao.AbstractUserDetailsAuthenticationProvider;
-import org.acegisecurity.userdetails.UserDetails;
-import org.acegisecurity.userdetails.UserDetailsService;
-import org.acegisecurity.userdetails.UsernameNotFoundException;
+import org.springframework.security.authentication.AnonymousAuthenticationProvider;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.authentication.ProviderManager;
+import org.springframework.security.authentication.RememberMeAuthenticationProvider;
+import org.springframework.security.authentication.dao.AbstractUserDetailsAuthenticationProvider;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.jenkinsci.Symbol;
-import org.kohsuke.args4j.Option;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.StaplerRequest;
-import org.springframework.dao.DataAccessException;
-import org.springframework.web.context.WebApplicationContext;
 
 import javax.annotation.Nonnull;
-import java.io.IOException;
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.*;
@@ -80,14 +76,18 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
 
     @Override
     public SecurityComponents createSecurityComponents() {
-        Binding binding = new Binding();
-        binding.setVariable("authenticator", new Authenticator());
-        BeanBuilder builder = new BeanBuilder();
-        builder.parse(Jenkins.get().servletContext.getResourceAsStream("/WEB-INF/security/AbstractPasswordBasedSecurityRealm.groovy"), binding);
-        WebApplicationContext context = builder.createApplicationContext();
+        // this does all the hard work.
+        Authenticator authenticator = new Authenticator();
+        // these providers apply everywhere
+        RememberMeAuthenticationProvider rmap = new RememberMeAuthenticationProvider(Jenkins.get().getSecretKey());
+        // this doesn't mean we allow anonymous access.
+        // we just authenticate anonymous users as such,
+        // so that later authorization can reject them if so configured
+        AnonymousAuthenticationProvider aap = new AnonymousAuthenticationProvider("anonymous");
+        AuthenticationManager authenticationManager = new ProviderManager(authenticator, rmap, aap);
         SecurityComponents securityComponents = new SecurityComponents(
-                findBean(AuthenticationManager.class, context),
-                new ImpersonatingUserDetailsService(this));
+                authenticationManager,
+                new ImpersonatingUserDetailsService2(this::loadUserByUsername2));
         if (optionals == null) return securityComponents;
         Map<SecurityRealm, SecurityComponents> securityComponentsMap = new HashMap<>();
         for (SecurityRealm securityRealm : optionals) {
@@ -134,7 +134,7 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
         private Authentication authenticateLocal(String name, Authentication authentication) {
             if (isPrivateUser(name)) {
                 logger.fine("SecurityComponents.authentication.isPrivateUser => " + name);
-                return securityComponents.manager.authenticate(authentication);
+                return securityComponents.manager2.authenticate(authentication);
             }
             return null;
         }
@@ -142,9 +142,9 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
         private Authentication authenticateOptionals(String name, Authentication authentication) {
             for (SecurityRealm securityRealm : optionals) {
                 SecurityComponents components = securityComponentsMap.get(securityRealm);
-                if (isOwnedBy(name, components.userDetails)) {
+                if (isOwnedBy(name, components.userDetails2)) {
                     logger.fine("SecurityComponents.authentication.isOwnedBy => " + name + " -> " + securityRealm);
-                    return components.manager.authenticate(authentication);
+                    return components.manager2.authenticate(authentication);
                 }
             }
             return null;
@@ -161,8 +161,9 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
             this.securityComponentsMap = securityComponentsMap;
         }
 
+
         @Override
-        public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException, DataAccessException {
+        public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
             {
                 if (priority) {
                     try {
@@ -172,7 +173,7 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
                         if (ud == null) {
                             throw e;
                         }
-                        
+
                         return ud;
                     }
                 } else {
@@ -188,7 +189,7 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
 
         private UserDetails loadUserByUsernameLocal(String username) {
             logger.fine("SecurityComponents.loadUserByUsername.isPrivateUser => " + username);
-            return securityComponents.userDetails.loadUserByUsername(username);
+            return securityComponents.userDetails2.loadUserByUsername(username);
         }
 
         private UserDetails loadUserByUsernameOptionals(String username) {
@@ -197,16 +198,12 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
                 try {
                     logger.fine("SecurityComponents.loadUserByUsername.isOwnedBy => " + username + " -> "
                             + securityRealm);
-                    return components.userDetails.loadUserByUsername(username);
+                    return components.userDetails2.loadUserByUsername(username);
                 } catch (UsernameNotFoundException ignore) {
                 }
             }
             return null;
         }
-    }
-
-    public static Details fromUserDetail(UserDetails userDetails) {
-        return proxyDetail(userDetails.getUsername(), null);
     }
 
     public static String emptyPassword() {
@@ -231,14 +228,14 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
     }
 
     @Override
-    public Details loadUserByUsername(String username) {
+    public UserDetails loadUserByUsername2(String username) {
         if (this.priority) {
             try {
-                return super.loadUserByUsername(username);
+                return super.loadUserByUsername2(username);
             } catch (UsernameNotFoundException e) {
                 for (SecurityRealm realm : optionals) {
                     try {
-                        return fromUserDetail(realm.loadUserByUsername(username));
+                        return realm.loadUserByUsername2(username);
                     } catch (UsernameNotFoundException ignore) {
                     }
                 }
@@ -247,80 +244,12 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
         } else {
             for (SecurityRealm realm : optionals) {
                 try {
-                    return fromUserDetail(realm.loadUserByUsername(username));
+                    return realm.loadUserByUsername2(username);
                 } catch (UsernameNotFoundException ignore) {
                 }
             }
-            return super.loadUserByUsername(username);
+            return super.loadUserByUsername2(username);
         }
-    }
-
-    @SuppressWarnings("deprecation")
-    public CliAuthenticator createCliAuthenticator(final CLICommand command) {
-        CliAuthenticator authenticator = super.createCliAuthenticator(command);
-        return new CliAuthenticator() {
-
-            @Option(name = "--username", usage = "User name to authenticate yourself to Jenkins")
-            public String userName;
-
-            @Option(name = "--password", usage = "Password for authentication. Note that passing a password in arguments is insecure.")
-            public String password;
-
-            @Option(name = "--password-file", usage = "File that contains the password")
-            public String passwordFile;
-
-            CliAuthenticator fillFields(CliAuthenticator authenticator) throws AuthenticationException {
-                for (Field field : authenticator.getClass().getDeclaredFields()) {
-                    try {
-                        if (field.getName().equalsIgnoreCase("userName")) {
-                            field.set(authenticator, userName);
-                        } else if (field.getName().equalsIgnoreCase("password")) {
-                            field.set(authenticator, password);
-                        } else if (field.getName().equalsIgnoreCase("passwordFile")) {
-                            field.set(authenticator, passwordFile);
-                        }
-                    } catch (IllegalAccessException e) {
-                        throw new AuthenticationException(e.getMessage(), e) {
-                        };
-                    }
-                }
-                return authenticator;
-            }
-
-            public Authentication authenticate() throws AuthenticationException, IOException, InterruptedException {
-                if (userName == null)
-                    return command.getTransportAuthentication();
-                if (priority) {
-                    if (isPrivateUser(userName)) {
-                        fillFields(authenticator);
-                        logger.fine("Authentication.authenticate.isPrivateUser => " + userName);
-                        return authenticator.authenticate();
-                    } else {
-                        for (SecurityRealm securityRealm : optionals) {
-                            try {
-                                securityRealm.loadUserByUsername(userName);
-                                logger.fine("Authentication.authenticate.isOwnedBy => " + userName + " -> " + securityRealm);
-                                return fillFields(securityRealm.createCliAuthenticator(command)).authenticate();
-                            } catch (UsernameNotFoundException ignore) {
-                            }
-                        }
-                        throw new UsernameNotFoundException("Not found in any realm");
-                    }
-                } else {
-                    for (SecurityRealm securityRealm : optionals) {
-                        try {
-                            securityRealm.loadUserByUsername(userName);
-                            logger.fine("Authentication.authenticate.isOwnedBy => " + userName + " -> " + securityRealm);
-                            return fillFields(securityRealm.createCliAuthenticator(command)).authenticate();
-                        } catch (UsernameNotFoundException ignore) {
-                        }
-                    }
-                    fillFields(authenticator);
-                    logger.fine("Authentication.authenticate.isPrivateUser => " + userName);
-                    return authenticator.authenticate();
-                }
-            }
-        };
     }
 
     class Authenticator extends AbstractUserDetailsAuthenticationProvider {
@@ -333,28 +262,23 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
         }
     }
 
-    private Details selfAuthenticate(String username, String password) {
-        Details u = super.loadUserByUsername(username);
-        if (!u.isPasswordCorrect(password)) {
+    private UserDetails selfAuthenticate(String username, String password) {
+        UserDetails u = super.loadUserByUsername2(username);
+        if (u.getPassword() != password) {
             String message = this.getLocalizedBadCredentialsMessage();
             throw new BadCredentialsException(message);
         }
-        
+
         return u;
     }
 
     private String getLocalizedBadCredentialsMessage() {
-        try {
-            return ResourceBundle.getBundle("org.acegisecurity.messages").getString("AbstractUserDetailsAuthenticationProvider.badCredentials");
-        } catch (MissingResourceException x) {
-            /* Expected if localisation string not present */
-        }
-
+        /* TODO */
         return "Bad credentials";
     }
 
     @Override
-    protected Details authenticate(String username, String password) throws AuthenticationException {
+    protected UserDetails authenticate2(String username, String password) throws AuthenticationException {
         if (priority) {
             if (isPrivateUser(username)) {
                 logger.fine("authenticate.isPrivateUser => " + username);
@@ -363,7 +287,7 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
                 for (SecurityRealm realm : optionals) {
                     try {
                         logger.fine("authenticate.isOwnedBy => " + username + " -> " + realm);
-                        return fromUserDetail(realm.loadUserByUsername(username));
+                        return realm.loadUserByUsername2(username);
                     } catch (UsernameNotFoundException ignore) {
                     }
                 }
@@ -372,7 +296,7 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
             for (SecurityRealm realm : optionals) {
                 try {
                     logger.fine("authenticate.isOwnedBy => " + username + " -> " + realm);
-                    return fromUserDetail(realm.loadUserByUsername(username));
+                    return realm.loadUserByUsername2(username);
                 } catch (UsernameNotFoundException ignore) {
                 }
             }
@@ -385,8 +309,8 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
     private UserDetails doAuthenticate(String username, String password) throws AuthenticationException {
         try {
             logger.fine("doAuthenticate => " + username);
-            Details user = authenticate(username, password);
-            SecurityListener.fireAuthenticated(user);
+            UserDetails user = authenticate2(username, password);
+            SecurityListener.fireAuthenticated2(user);
             return user;
         } catch (AuthenticationException x) {
             SecurityListener.fireFailedToAuthenticate(username);
