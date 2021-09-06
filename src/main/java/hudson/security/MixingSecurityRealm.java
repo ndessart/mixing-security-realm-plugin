@@ -423,6 +423,9 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
 
         @Override
         public UserProperty newInstance(StaplerRequest req, @Nonnull JSONObject formData) throws FormException {
+            if (req == null) {
+                return super.newInstance(null, formData);
+            }
             User user = req.findAncestorObject(User.class);
             if (user == null) {
                 throw new IllegalArgumentException("No ancestor of type User in the request");
@@ -496,7 +499,13 @@ public class MixingSecurityRealm extends HudsonPrivateSecurityRealm {
                     String id = j.getString("$id");
                     j.remove("$id");
                     j.remove("$enabled");
-                    optionals.add(Objects.requireNonNull(Objects.requireNonNull(all.findByName(id)).newInstance(req, j)));
+                    Descriptor<SecurityRealm> descriptor = all.findByName(id);
+                    if (descriptor != null) {
+                        SecurityRealm realm = descriptor.newInstance(req, j);
+                        if (realm != null) {
+                            optionals.add(realm);
+                        }
+                    }
                 }
             }
             save();
