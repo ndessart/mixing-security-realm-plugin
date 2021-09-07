@@ -9,7 +9,7 @@
     </parent>
     <groupId>io.jenkins.plugins</groupId>
     <artifactId>mixing-security-realm</artifactId>
-    <version>1.3-SNAPSHOT</version>
+    <version>1.3</version>
     <packaging>hpi</packaging>
     <properties>
         <jenkins.version>2.222.1</jenkins.version>
@@ -29,7 +29,8 @@
         <connection>scm:git:git://github.com/jenkinsci/${project.artifactId}-plugin.git</connection>
         <developerConnection>scm:git:git@github.com:jenkinsci/${project.artifactId}-plugin.git</developerConnection>
         <url>https://github.com/jenkinsci/${project.artifactId}-plugin</url>
-    </scm>
+      <tag>mixing-security-realm-1.3</tag>
+  </scm>
     <repositories>
         <repository>
             <id>repo.jenkins-ci.org</id>
