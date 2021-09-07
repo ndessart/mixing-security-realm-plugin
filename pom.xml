@@ -17,6 +17,7 @@
         <spotbugs.failOnError>false</spotbugs.failOnError> <!-- TODO currently two violations -->
     </properties>
     <name>Mixing Security Realm Plugin</name>
+    <description>This plug-in is used to mix local Hudson users with other security realm, such as LDAP.</description>
     <licenses>
         <license>
             <name>MIT License</name>
